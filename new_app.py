@@ -86,12 +86,18 @@ def load_data():
     if 'OfferCourseName' in df.columns: df['Entry_Major'] = df['OfferCourseName'].apply(clean_major)
     if 'Program' in df.columns: df['Current_Major'] = df['Program'].apply(clean_major)
 
+    # Identify Switchers for Filtering
+    student_meta = df.groupby('StudentID').agg({
+        'Entry_Major': 'first',
+        'Current_Major': 'last'
+    }).reset_index()
+    student_meta['Did_Switch_Major'] = (student_meta['Entry_Major'] != student_meta['Current_Major']).astype(int)
+    df = df.merge(student_meta[['StudentID', 'Did_Switch_Major']], on='StudentID', how='left')
+
     # Aggregation
     summer_takers = df[df['Sem_Num'] == 3]['StudentID'].unique()
     
-    # Get Max Semester Reached per Student
     max_sem = df.groupby('StudentID').size().reset_index(name='Total_Semesters_Approx')
-    # Approximation: Total records / avg courses per sem (4)
     max_sem['Semester_Count'] = (max_sem['Total_Semesters_Approx'] / 4).round().astype(int)
     
     agg_rules = {
@@ -104,7 +110,8 @@ def load_data():
         'CourseCode': 'count',
         'Status': 'last',
         'Admission Year': 'first',
-        'NativeLanguage': 'first'
+        'NativeLanguage': 'first',
+        'Did_Switch_Major': 'first'
     }
     valid_rules = {k: v for k, v in agg_rules.items() if k in df.columns}
     
@@ -114,7 +121,6 @@ def load_data():
     student_agg['Has_Taken_Summer'] = student_agg.index.isin(summer_takers).astype(int)
     student_agg['AtRisk'] = (student_agg['CGPA'] < 2.0).astype(int)
     student_agg['Is_Exited'] = (student_agg['Status'] == 'Exited').astype(int)
-    student_agg['Did_Switch_Major'] = (student_agg['Entry_Major'] != student_agg['Current_Major']).astype(int)
 
     if 'Nationality' in student_agg.columns:
         top_nats = student_agg['Nationality'].value_counts().nlargest(5).index
@@ -123,11 +129,10 @@ def load_data():
     return df, student_agg
 
 # =============================================================================
-# 2. MODEL TRAINING (Using Semester Count)
+# 2. MODEL TRAINING
 # =============================================================================
 @st.cache_resource
 def train_models(student_agg):
-    # Use Semester_Count instead of Total_Courses for intuitive input
     feat_cols = ['Gender', 'FinancialAid_Binary', 'Nationality_Grouped', 'Current_Major', 'Semester_Count', 'Has_Taken_Summer']
     model_df = student_agg.dropna(subset=feat_cols + ['CGPA', 'Is_Exited'])
     
@@ -172,7 +177,7 @@ tabs = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# TAB 1: EXECUTIVE OVERVIEW (ENHANCED)
+# TAB 1: EXECUTIVE OVERVIEW
 # =============================================================================
 with tabs[0]:
     st.markdown("### 🏛️ The State of the University")
@@ -191,7 +196,7 @@ with tabs[0]:
     
     st.divider()
     
-    # Student Lifecycle Flow
+    # Student Lifecycle
     st.subheader("🎓 The Student Lifecycle")
     status_counts = student_agg['Status'].value_counts()
     fig_lifecycle = go.Figure(go.Funnel(
@@ -229,38 +234,125 @@ with tabs[0]:
         st.plotly_chart(fig_tree, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# TAB 2 & 3 (PLACEHOLDERS - Copied from previous robust logic)
+# TAB 2: THE BARRIERS
 # -----------------------------------------------------------------------------
 with tabs[1]:
     st.header("Chapter 2: Where do students stumble?")
-    st.info("💡 **Insight:** Business students face a 34% failure rate in Computer Science electives.")
-    # (Heatmap Logic same as previous version)
-    clean_students = student_agg[student_agg['Did_Switch_Major'] == 0].index
-    df_clean = df[df['StudentID'].isin(clean_students)]
-    top_progs = df_clean['Program'].value_counts().head(8).index
+    st.markdown("Forensic analysis of curriculum bottlenecks and failure points.")
+    
+    # Filter for Non-Switchers only
+    df_clean = df[df['Did_Switch_Major'] == 0].copy()
     df_clean['Is_Fail'] = df_clean['Grade'].isin(['E', 'F']).astype(int)
+    
+    # 1. HEATMAP
+    st.subheader("1. Curriculum Bottlenecks (Heatmap)")
+    st.write("Failure rates by Major & Course. (Filtered for Non-Switchers).")
+    
+    top_progs = df_clean['Program'].value_counts().head(8).index
     c_code = 'CourseCode' if 'CourseCode' in df.columns else 'Course Code'
     c_name = 'CourseName' if 'CourseName' in df.columns else 'Course Name'
+    
     stats = df_clean.groupby([c_code, c_name]).agg({'Is_Fail': 'mean', 'StudentID': 'count'})
     killers = stats[stats['StudentID'] > 30].sort_values('Is_Fail', ascending=False).head(8)
     killer_codes = killers.index.get_level_values(0)
+    
     misalign = df_clean[(df_clean['Program'].isin(top_progs)) & (df_clean[c_code].isin(killer_codes))]
     heatmap_data = misalign.pivot_table(index='Program', columns=c_name, values='Is_Fail', aggfunc='mean')
-    fig = px.imshow(heatmap_data, text_auto='.0%', aspect="auto", color_continuous_scale='Reds')
-    st.plotly_chart(fig, use_container_width=True)
+    
+    fig_heat = px.imshow(heatmap_data, text_auto='.1%', aspect="auto", color_continuous_scale='Reds')
+    st.plotly_chart(fig_heat, use_container_width=True)
 
+    st.divider()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("2. The 'Killer Course' Leaderboard")
+        top_10_killers_bar = stats[stats['StudentID'] > 30].sort_values('Is_Fail', ascending=False).head(10).reset_index()
+        fig_bar = px.bar(top_10_killers_bar, x='Is_Fail', y=c_name, orientation='h', 
+                         title="Top 10 Courses with Highest Failure Rates",
+                         color='Is_Fail', color_continuous_scale='Reds')
+        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+    with c2:
+        st.subheader("3. The Sophomore Wall")
+        def get_level(code):
+            num = ''.join(filter(str.isdigit, str(code)))
+            return int(num[0])*100 if len(num) >= 3 else None
+        df_clean['Level'] = df_clean[c_code].apply(get_level)
+        level_fail = df_clean.groupby('Level')['Is_Fail'].mean().reset_index()
+        level_fail = level_fail[level_fail['Level'].isin([100, 200, 300, 400])]
+        fig_level = px.line(level_fail, x='Level', y='Is_Fail', markers=True, title="Failure Rate by Course Level")
+        fig_level.update_traces(line_color='orange', line_width=3)
+        st.plotly_chart(fig_level, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# TAB 3: THE MIGRATION (RESTORED PREDICTOR)
+# -----------------------------------------------------------------------------
 with tabs[2]:
     st.header("Chapter 3: The Great Migration")
     st.markdown("Where do students start, and where do they actually graduate from?")
-    # (Migration Logic same as previous version)
+    
+    # 1. INTERACTIVE PREDICTOR (RESTORED)
+    st.subheader("1. Switch Success Predictor")
+    st.markdown("Use this tool to check: *If I switch from X to Y, what are my chances?*")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        start_major = st.selectbox("Started in:", sorted(student_agg['Entry_Major'].unique()))
+    with c2:
+        end_major = st.selectbox("Switched to:", sorted(student_agg['Current_Major'].unique()))
+        
+    specific_switchers = student_agg[
+        (student_agg['Entry_Major'] == start_major) & 
+        (student_agg['Current_Major'] == end_major)
+    ]
+    
+    count = len(specific_switchers)
+    
+    if start_major == end_major:
+        st.success(f"Most students stay put. {count} students started and finished in {start_major}.")
+    else:
+        if count > 0:
+            success_rate = (1 - specific_switchers['AtRisk'].mean()) * 100
+            avg_gpa_switch = specific_switchers['CGPA'].mean()
+            
+            colA, colB, colC = st.columns(3)
+            colA.metric("Students moved", f"{count}")
+            colB.metric("Success Rate", f"{success_rate:.0f}%")
+            colC.metric("Avg GPA", f"{avg_gpa_switch:.2f}")
+            
+            if success_rate > 80:
+                st.success("✅ **High Success Path.** Students taking this path tend to perform well.")
+            elif success_rate < 50:
+                st.error("⚠️ **High Risk Path.** Students switching here often struggle.")
+            else:
+                st.warning("⚖️ **Mixed Results.** Performance varies.")
+        else:
+            st.warning("No historical data for this specific switch.")
+
+    st.divider()
+
+    # 2. MIGRATION MATRIX
+    st.subheader("2. The Migration Matrix (Frequency)")
     migration_counts = student_agg.groupby(['Entry_Major', 'Current_Major']).size().reset_index(name='Count')
     mig_pivot = migration_counts.pivot(index='Entry_Major', columns='Current_Major', values='Count').fillna(0)
-    fig_mig = px.imshow(mig_pivot, x=mig_pivot.columns, y=mig_pivot.index, text_auto=True, color_continuous_scale='Blues', aspect="auto")
-    fig_mig.update_layout(title="Student Flow: Entry vs. Exit Major")
+    fig_mig = px.imshow(mig_pivot, text_auto=True, color_continuous_scale='Blues', aspect="auto", labels=dict(x="Graduated As", y="Started As"))
     st.plotly_chart(fig_mig, use_container_width=True)
 
+    # 3. TOP SWITCHES
+    st.subheader("3. Top Migration Paths")
+    switchers = student_agg[student_agg['Did_Switch_Major'] == 1]
+    if len(switchers) > 0:
+        switch_path = switchers.groupby(['Entry_Major', 'Current_Major']).size().reset_index(name='Count')
+        switch_path['Path'] = switch_path['Entry_Major'] + " ➝ " + switch_path['Current_Major']
+        switch_path = switch_path.sort_values('Count', ascending=False).head(10)
+        fig_bar = px.bar(switch_path, y='Path', x='Count', orientation='h', title="Most Common Switches", color='Count', color_continuous_scale='Reds')
+        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_bar, use_container_width=True)
+
 # -----------------------------------------------------------------------------
-# TAB 4: THE ORACLE (UPDATED: SEMESTER BASED)
+# TAB 4: THE ORACLE (SEMESTER BASED)
 # -----------------------------------------------------------------------------
 with tabs[3]:
     st.header("Chapter 4: The Oracle")
@@ -273,14 +365,10 @@ with tabs[3]:
         nation = c3.selectbox("Region", ["Country0", "Country3", "Other"])
         
         c4, c5, c6 = st.columns(3)
-        # NEW: Semester Input instead of Courses
         semester_display = c4.selectbox("Current Semester", 
-            ["Year 1 Sem 1", "Year 1 Sem 2", 
-             "Year 2 Sem 1", "Year 2 Sem 2", 
-             "Year 3 Sem 1", "Year 3 Sem 2", 
-             "Year 4 Sem 1", "Year 4 Sem 2"])
+            ["Year 1 Sem 1", "Year 1 Sem 2", "Year 2 Sem 1", "Year 2 Sem 2", 
+             "Year 3 Sem 1", "Year 3 Sem 2", "Year 4 Sem 1", "Year 4 Sem 2"])
         
-        # Map Semester to Count (Approximate logic: 1 Sem = 4 courses)
         sem_map = {
             "Year 1 Sem 1": 1, "Year 1 Sem 2": 2,
             "Year 2 Sem 1": 3, "Year 2 Sem 2": 4,
@@ -288,12 +376,11 @@ with tabs[3]:
             "Year 4 Sem 1": 7, "Year 4 Sem 2": 8
         }
         sem_count_val = sem_map[semester_display]
-        est_courses = sem_count_val * 4 # Estimate for clustering
+        est_courses = sem_count_val * 4 
         
         summer = c5.checkbox("Taken Summer School?")
         finaid = c6.checkbox("On Financial Aid?")
 
-    # Run Prediction
     input_df = pd.DataFrame({
         'Gender': [gender],
         'FinancialAid_Binary': [1 if finaid else 0],
@@ -303,18 +390,15 @@ with tabs[3]:
         'Has_Taken_Summer': [1 if summer else 0]
     })
     
-    # Predict Risk & GPA
     pred_risk = risk_model.predict_proba(input_df)[0][1]
     pred_gpa = gpa_model.predict(input_df)[0]
     
-    # Cluster (Still needs Course Count, so we use estimate)
     X_clust = pd.DataFrame({'CGPA': [pred_gpa], 'Total_Courses': [est_courses], 'Has_Taken_Summer': [1 if summer else 0]})
-    # Note: Ensure scaler matches training dimensions. If dimension mismatch occurs in live app, wrap in try/except.
     try:
         X_clust_scaled = scaler.transform(X_clust)
         pred_cluster = kmeans.predict(X_clust_scaled)[0]
     except:
-        pred_cluster = 1 # Default if scaler mismatch
+        pred_cluster = 1 
     
     cluster_map = {0: "Fast Track / High Achiever", 1: "Standard / Consistent", 2: "Recovering / Needs Support"}
 
