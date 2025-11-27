@@ -516,7 +516,7 @@ with tabs[5]:
     st.divider()
     st.subheader("Scenario Simulator")
     st.markdown("Use this tool to explore 'What If' scenarios.")
-    st.components.v1.iframe("https://huggingface.co/spaces/ThommyCodes/ashesi-probation-risk-app", height=800, scrolling=True)
+    st.components.v1.iframe("https://thommycodes-ashesi-probation-risk-app.hf.space", height=800, scrolling=True)
     st.caption("An external interactive tool to simulate different student profiles and predict their outcomes.")
 
 # -----------------------------------------------------------------------------
