@@ -56,9 +56,11 @@ st.markdown("""
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv('student_data_small.csv', low_memory=False)
+        # Pandas automatically unzips it on the fly
+        df = pd.read_csv('Final_merged_student_data.zip', low_memory=False)
     except:
-        df = pd.read_csv('student_data_small.csv', low_memory=False, encoding='ISO-8859-1')
+        # Fallback if you haven't zipped it yet
+        df = pd.read_csv('Final_merged_student_data.csv', low_memory=False, encoding='ISO-8859-1')
     
     # --- RENAMING ---
     cols_map = {
